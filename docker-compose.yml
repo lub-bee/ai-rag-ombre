@@ -1,0 +1,20 @@
+services:
+  singlestore:
+    image: ghcr.io/singlestore-labs/singlestoredb-dev:latest
+    container_name: singlestore
+    ports:
+      - "3306:3306"
+    environment:
+      LICENSE_KEY: ""  # Laisser vide pour usage local/dev
+      ROOT_PASSWORD: "secret"
+    volumes:
+      - singlestore_data:/var/lib/memsql
+    healthcheck:
+      # test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      test: ["CMD-SHELL", "echo 'SELECT 1' | memsql -u root -psecret"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  singlestore_data:
