@@ -1,22 +1,26 @@
 import os
-import singlestoredb as s2db
+import time
 import requests
 from datetime import datetime
+import singlestoredb as s2db
 from langchain_ollama import OllamaLLM, OllamaEmbeddings
 from langchain_singlestore import SingleStoreVectorStore
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
+from langchain_core.runnables import RunnableConfig
+
 
 def log_step(label):
     now = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"[{now}] {label}")
 
+
 def ensure_database_exists(host, user, password, db_name):
-    """Create the DB if it doesn't exist yet."""
     try:
         with s2db.connect(host=host, user=user, password=password) as conn:
             with conn.cursor() as cursor:
                 cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+        log_step(f"✅ Database '{db_name}' is ready.")
         return True
     except Exception as e:
         print("❌ Could not create database:", e)
@@ -30,6 +34,7 @@ def check_database_connection(host, user, password, db_name):
     except Exception:
         return False
 
+
 def check_ollama_model_ready(model_name):
     try:
         response = requests.get("http://localhost:11434/api/tags", timeout=2)
@@ -40,6 +45,7 @@ def check_ollama_model_ready(model_name):
             print(f"❌ Model '{model_name}' is not downloaded.")
             print(f"➡️  Run this to download it:\n    ollama pull {model_name}")
             return False
+        log_step(f"✅ Model '{model_name}' is available.")
         return True
     except Exception as e:
         print(f"❌ Cannot reach Ollama at http://localhost:11434 : {e}")
@@ -60,7 +66,7 @@ def load_documents(folder="data"):
                         metadata={"source": file_path}
                     )
                     documents.append(doc)
-    print(f"Loaded {len(documents)} documents from '{folder}'")
+    log_step(f"📂 Loaded {len(documents)} documents from '{folder}'")
     return documents
 
 
@@ -70,24 +76,30 @@ def main():
     password = "secret"
     database = "campagne_ombre"
     table_name = "lore_documents"
-    model_name = "llama3:latest"
+    model_name = "phi3:mini" #tested with llama3
 
-    print("Ensuring database exists...")
+    log_step("🔌 Ensuring database exists...")
     if not ensure_database_exists(host, user, password, database):
         return
 
-    print("Checking connection to SingleStoreDB...")
+    log_step("🔁 Checking database connection...")
     if not check_database_connection(host, user, password, database):
         print("❌ Cannot connect to SingleStoreDB at", host)
         print("➡️  Make sure the server is running with: docker compose up -d")
         return
+    log_step("✅ Connected to SingleStoreDB.")
 
-    print("Connected to SingleStoreDB.")
+    log_step("📡 Checking Ollama model availability...")
+    if not check_ollama_model_ready(model_name):
+        return
 
-    print("Loading and embedding new lore documents...")
+    log_step("📂 Loading documents from 'data/'...")
     documents = load_documents("data")
+
+    log_step("⚙️ Initializing embedding model...")
     embedding = OllamaEmbeddings(model="mxbai-embed-large")
 
+    log_step("🧱 Initializing vector store...")
     vector_store = SingleStoreVectorStore(
         embedding=embedding,
         host=host,
@@ -97,36 +109,35 @@ def main():
         table_name=table_name
     )
 
+    log_step("🔍 Checking existing documents in vector store...")
     existing_sources = set(
         doc.metadata["source"]
         for doc in vector_store.similarity_search("ignore", k=1000)
     )
     new_docs = [doc for doc in documents if doc.metadata["source"] not in existing_sources]
+    log_step(f"📊 Found {len(new_docs)} new documents to embed.")
 
     if new_docs:
-        print(f"Adding {len(new_docs)} new document(s)...")
+        start_embed = time.time()
         vector_store.add_documents(new_docs)
+        log_step(f"✅ Added {len(new_docs)} documents in {round(time.time() - start_embed, 2)}s.")
     else:
-        print("No new documents to embed.")
-
-    print("Checking Ollama model availability...")
-    if not check_ollama_model_ready(model_name):
-        return
+        log_step("📭 No new documents to embed.")
 
     retriever = vector_store.as_retriever(search_kwargs={"k": 2})
-    model = OllamaLLM(model="llama3")
+    model = OllamaLLM(model=model_name)
 
     prompt = ChatPromptTemplate.from_template("""
-You are a helpful assistant for a tabletop RPG campaign.
-Use the following lore documents to answer the player's question.
+You are a concise, helpful assistant for a tabletop RPG campaign. 
+Answer the player's question based only on the information provided below. 
+Do not invent questions, do not continue the conversation beyond the answer.
 
-Lore:
+Lore documents:
 {lore_documents}
 
 Question:
 {question}
 """)
-
     chain = prompt | model
 
     print("\n--- Lore Q&A System ---")
@@ -137,14 +148,25 @@ Question:
         user_input = input("Your question: ")
         if user_input.lower() == "exit":
             break
+
+        log_step("🔎 Retrieving documents...")
+        t0 = time.time()
         lore_documents = retriever.invoke(user_input)
-        result = chain.invoke({
+        log_step(f"📚 Retrieved {len(lore_documents)} docs in {round(time.time() - t0, 2)}s.")
+
+        log_step("✍️ Generating answer with LLM (streaming)...")
+        t1 = time.time()
+
+        print("\n--- Answer ---")
+        for chunk in chain.stream({
             "lore_documents": lore_documents,
             "question": user_input
-        })
-        print("\n--- Answer ---")
-        print(result)
+        }, config=RunnableConfig()):
+            print(chunk, end="", flush=True)
+
         print()
+        log_step(f"\n✅ Answer streamed in {round(time.time() - t1, 2)}s.")
+
 
 
 if __name__ == "__main__":
