@@ -1,3 +1,6 @@
+#keep the folder but ignore its content
+!data/.gitkeep
 data/*
 
-!data/.gitkeep
+# Rag cache
+embed_cache.json

@@ -9,6 +9,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
 
+from embed_cache import load_cache, save_cache, file_needs_embedding, update_cache
+
 
 def log_step(label):
     now = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -55,17 +57,25 @@ def check_ollama_model_ready(model_name):
 
 def load_documents(folder="data"):
     documents = []
+    cache = load_cache()
+
     for root, _, files in os.walk(folder):
         for filename in files:
             if filename.endswith(".md") or filename.endswith(".txt"):
                 file_path = os.path.join(root, filename)
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    doc = Document(
-                        page_content=content,
-                        metadata={"source": file_path}
-                    )
-                    documents.append(doc)
+
+                if file_needs_embedding(file_path, cache):
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                        doc = Document(
+                            page_content=content,
+                            metadata={"source": file_path}
+                        )
+                        documents.append(doc)
+                        update_cache(file_path, cache)
+
+    save_cache(cache)
+
     log_step(f"📂 Loaded {len(documents)} documents from '{folder}'")
     return documents
 
